@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#1B5E20">
+<title>Copia de seguridad - Cuaderno de Búlder (beta)</title>
+<style>
+:root{--bg:#E8EDE7;--surface:#F7FAF6;--ink:#172126;--muted:#56656A;--line:#C9D6C7;--accent:#1B5E20;--accent-ink:#fff;--bad:#B3261E;color-scheme:light dark}
+@media (prefers-color-scheme: dark){:root{--bg:#0E150F;--surface:#172219;--ink:#E4EBE8;--muted:#93A3A6;--line:#28382A;--accent:#3E9A4A;--bad:#F27168}}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:var(--bg);color:var(--ink);font:16px/1.45 "IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;min-height:100vh;min-height:100dvh}
+main{flex:1;width:100%;max-width:780px;margin:0 auto;padding:20px 16px}
+h1{font:800 24px/1.2 "Archivo","Arial Narrow",system-ui,sans-serif;margin:0 0 8px}
+p{margin:0 0 12px;color:var(--muted)}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin:16px 0}
+.panel ul{list-style:none;margin:0;padding:0}
+.panel li{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--line)}
+.panel li:last-child{border-bottom:0}
+.panel b{font-variant-numeric:tabular-nums}
+.bar{position:sticky;bottom:0;padding:12px 16px calc(12px + env(safe-area-inset-bottom,0px));background:var(--bg);border-top:1px solid var(--line)}
+button{display:block;width:100%;max-width:780px;margin:0 auto;min-height:56px;border-radius:14px;font:600 18px/1 inherit;font-family:inherit;text-align:center}
+button{border:0;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+button:disabled{opacity:.45}
+p.back{text-align:center;margin:10px auto 0;max-width:780px;color:var(--ink);font-weight:500}
+#msg{color:var(--muted)}
+#msg.err{color:var(--bad)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Copia de seguridad</h1>
+  <p>Descarga un archivo con todas tus sesiones, bloques y fotos guardados en este móvil. Hazlo al terminar cada día de rocódromo y guarda el archivo fuera del móvil.</p>
+  <div class="panel"><ul id="lista"><li><span>Leyendo datos…</span></li></ul></div>
+  <p id="almac"></p>
+  <p id="msg" role="status"></p>
+</main>
+<div class="bar">
+  <button id="btn" disabled>Descargar copia (.json)</button>
+  <p class="back">Cierra esta pestaña y vuelve a la app instalada</p>
+</div>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const msg = (t, err) => { $('msg').textContent = t; $('msg').className = err ? 'err' : ''; };
+  const req = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const pad = n => String(n).padStart(2, '0');
+  const b64 = blob => new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => { const s = String(fr.result); res(s.slice(s.indexOf(',') + 1)); };
+    fr.onerror = () => rej(fr.error);
+    fr.readAsDataURL(blob);
+  });
+  function openDb() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('cuaderno-beta');
+      r.onupgradeneeded = () => { r.transaction.abort(); };   // si no existe, no la crea vacía
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error || new Error('sin datos'));
+    });
+  }
+  let cols = null, fotos = null;
+  async function leer() {
+    let d;
+    try { d = await openDb(); } catch (e) { cols = null; fotos = null; $('lista').innerHTML = '<li><span>Aún no hay datos guardados en este móvil.</span></li>'; return false; }
+    try {
+      const t = d.transaction(['docs', 'blobs'], 'readonly');
+      const rows = await req(t.objectStore('docs').getAll());
+      const blobs = await req(t.objectStore('blobs').getAll());
+      cols = {}; for (const r of rows) (cols[r.c] || (cols[r.c] = {}))[r.id] = r.d;
+      fotos = blobs;
+    } finally { d.close(); }
+    const ul = $('lista'); ul.textContent = '';
+    const fila = (n, v) => { const l = document.createElement('li'); const s = document.createElement('span'); s.textContent = n; const b = document.createElement('b'); b.textContent = v; l.append(s, b); ul.append(l); };
+    for (const c of Object.keys(cols).sort()) fila(c, Object.keys(cols[c]).length);
+    fila('fotos', fotos.length);
+    $('btn').disabled = false;
+    return true;
+  }
+  async function almac() {
+    let t = '';
+    try { if (navigator.storage && navigator.storage.persisted) t += (await navigator.storage.persisted()) ? 'Almacenamiento persistente: sí. ' : 'Almacenamiento persistente: no (el navegador podría borrarlo si falta espacio). '; } catch (e) {}
+    try { if (navigator.storage && navigator.storage.estimate) { const e = await navigator.storage.estimate(); t += 'Espacio usado: ' + (e.usage / 1048576).toFixed(1) + ' MB.'; } } catch (e) {}
+    $('almac').textContent = t;
+  }
+  $('btn').addEventListener('click', async () => {
+    $('btn').disabled = true; msg('Preparando archivo…');
+    try {
+      if (!(await leer())) { msg('No hay datos que exportar.', true); return; }   // vuelve a leer en este momento
+      const f = {};
+      for (const r of fotos) f[r.id] = { type: (r.blob && r.blob.type) || r.type || '', base64: await b64(r.blob) };
+      const n = new Date();
+      const data = { version: 1, exportado: n.toISOString(), colecciones: cols, fotos: f };
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'cuaderno-beta-' + n.getFullYear() + '-' + pad(n.getMonth() + 1) + '-' + pad(n.getDate()) + '.json';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      msg('Copia descargada: ' + a.download);
+    } catch (e) { msg('No se pudo preparar la copia: ' + (e && e.message || e), true); }
+    $('btn').disabled = false;
+  });
+  almac();
+  leer().catch(e => { $('lista').innerHTML = ''; msg('No se pudieron leer los datos: ' + (e && e.message || e), true); });
+})();
+</script>
+</body>
+</html>
